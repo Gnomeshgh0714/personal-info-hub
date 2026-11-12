@@ -1,0 +1,32 @@
+% 合成示例简历：人物、机构与数字全部虚构，仅用于演示 resume_tex 提取器。
+% 结构约定：\resumesection{节} / \resumeentry{名称}{时间} / \resumesubentry{角色}{地点} / \item 要点
+\documentclass{article}
+\newcommand{\resumesection}[1]{\section*{#1}}
+\newcommand{\resumeentry}[2]{\textbf{#1}\hfill{#2}}
+\newcommand{\resumesubentry}[2]{\textit{#1}\hfill{#2}}
+\begin{document}
+
+\resumesection{联系方式}
+\item 李小明 · demo@example.com · 138-0000-0000
+
+\resumesection{教育背景}
+\resumeentry{某大学 · 社会学硕士}{2024 年 9 月 -- 2027 年 6 月（预期）}
+\item 主修方向：计算社会学；辅修统计学。
+
+\resumesection{实习经历}
+\resumeentry{示例咨询公司}{2026 年 6 月 -- 2026 年 9 月}
+\resumesubentry{咨询实习生（数字化转型方向）}{上海}
+\item 参与行业数字化转型专题研究，独立完成 3 份行业标杆研究报告。
+\item 清洗与校验市场可比数据 12,000 条，维护项目数据库。
+
+\resumesection{项目经历}
+\resumeentry{城市数据看板}{2025 年 3 月 -- 2025 年 8 月}
+\resumesubentry{独立开发者}{远程}
+\item 用 Python 与 ECharts 搭建城市公开数据看板，覆盖 12 个指标、6 个城区。
+\item 端到端测试 38 项全部通过。
+
+\resumesection{技能}
+\item 工具语言：英语（CET-6：600，IELTS：7.5）。
+\item 技术栈：Python、Stata、SQL；熟悉 Django 与 Vue。
+
+\end{document}

@@ -1,0 +1,80 @@
+# 个人信息中台 .gitignore
+# 中台只存结构化文本条目与路径引用，不复制任何源二进制本体。
+
+# --- 采集器运行时状态（游标、id 映射、hook 探针日志）---
+collector/state/
+
+# --- 系统与编辑器噪声 ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.idea/
+.vscode/
+
+# --- 密钥与环境变量 ---
+.env
+.env.*
+*.pem
+*.key
+
+# --- 二进制与压缩包：一律不入库（只允许路径引用出现在 jsonl / md 里）---
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.zip
+*.rar
+*.7z
+*.gz
+*.tar
+*.bz2
+*.xlsx
+*.xlsm
+*.xls
+*.docx
+*.doc
+*.pptx
+*.ppt
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.sqlite
+*.db
+*.pack
+
+# --- LaTeX 编译中间产物 ---
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# --- Python 运行产物 ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# --- 隐私默认：采集产物与个人数据不入库 ---
+# 复用者跑起来后，中台数据/ 里全是自己的真实经历条目；
+# 默认忽略，想公开示例数据时再显式 git add -f。
+中台数据/
+待核验队列.md
+采集日志.md
+
+# --- 本地 IDE 配置（hook 接线写在 .qoder/settings.local.json，含个人路径）---
+.qoder/settings.local.json
+
+# --- 说明 ---
+# 本仓库只入库引擎代码、配置模板、合成示例与文档；
+# 真实个人数据（采集产物、运行时状态、本地 IDE 配置）默认全部排除。
