@@ -8,6 +8,10 @@ JSON，恒定 exit 0——hook 绝不能阻断 Agent 主流程。
 1. 把触发事实与 transcript 线索追加写入 collector/state/hook_events.jsonl
    （state/ 已被 .gitignore 排除，不入库）；
 2. 读 transcript_path，统计行数与口述事实线索命中行数，为后续的会话抽取存证。
+   R1-4 起带去抖：同一 session 在 DEBOUNCE_SECONDS（60s）内重复 Stop 不重扫
+   transcript，状态存 collector/state/debounce.json（gitignored）。本脚本并不跑
+   --incremental（采集在 SessionStart 那边），所以去抖省的只是重复 IO；去抖逻辑
+   读写异常一律按放行处理，恒 exit 0 的 fail-open 语义不变。
 
 接线开关 ENABLE_SESSION_EXTRACT 默认 True：完整读 transcript 并登记线索计数。
 但「口述事实 → 候选条目」的抽取逻辑尚未实现，所以开关打开后仍不会产生任何
@@ -35,6 +39,7 @@ import json
 import os
 import re
 import sys
+import time
 
 # --------------------------------------------------------------------------
 # 路径：一律由本文件位置推导，不依赖 cwd
@@ -50,6 +55,60 @@ ENABLE_SESSION_EXTRACT = True
 
 TRANSCRIPT_READ_LIMIT = 2_000_000   # transcript 最多读入字符数，防大文件拖慢会话结束
 MSG_LEN = 200                       # 事件字段截断长度
+
+# --------------------------------------------------------------------------
+# 去抖闸门（R1-4）
+# --------------------------------------------------------------------------
+DEBOUNCE_PATH = os.path.join(STATE_DIR, 'debounce.json')
+DEBOUNCE_SECONDS = 60       # 同一 session 在此窗口内重复触发时，拦下重复动作
+DEBOUNCE_KEEP = 200         # 状态文件最多保留的键数，防 session 累积把它撑大
+
+
+def _load_debounce() -> dict:
+    try:
+        with open(DEBOUNCE_PATH, 'r', encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:                              # noqa: BLE001  fail-open
+        return {}                                  # 读不到/损坏就当没有记录：
+                                                   # 宁可多跑一次，也不能漏采
+
+
+def _save_debounce(d: dict) -> None:
+    try:
+        if len(d) > DEBOUNCE_KEEP:                 # 只留最近的一批键
+            d = dict(sorted(d.items(), key=lambda kv: kv[1])[-DEBOUNCE_KEEP:])
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = DEBOUNCE_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(d, f, ensure_ascii=False, indent=1, sort_keys=True)
+        os.replace(tmp, DEBOUNCE_PATH)             # 原子替换，避免半截文件
+    except Exception:                              # noqa: BLE001  写失败不影响主流程
+        pass
+
+
+def debounce_gate(hook: str, session_id) -> tuple:
+    """返回 (放行?, 说明字典)。放行时顺手把本次时间戳写回状态文件。
+
+    时钟回拨（gap < 0）按放行处理：那种情况下拦不住任何真实重复，
+    而误拦一次采集的代价远大于多跑一次。
+    """
+    key = '%s:%s' % (hook, session_id or 'unknown')
+    now = time.time()
+    d = _load_debounce()
+    try:
+        gap = now - float(d.get(key))
+    except (TypeError, ValueError):
+        gap = None                                 # 没有记录或记录损坏
+    if gap is not None and 0 <= gap < DEBOUNCE_SECONDS:
+        return False, {'debounced': True,
+                       'debounce_window': DEBOUNCE_SECONDS,
+                       'since_last_seconds': round(gap, 1)}
+    d[key] = now
+    _save_debounce(d)
+    return True, {'debounced': False,
+                  'debounce_window': DEBOUNCE_SECONDS,
+                  'since_last_seconds': (round(gap, 1) if gap is not None else None)}
 
 # 口述事实线索词：按这些词定位候选句。当前只用于计数，不做抽取。
 FACT_HINT_RE = re.compile(
@@ -128,9 +187,17 @@ def main():
     }
     tp = data.get('transcript_path')
     if tp:
-        summary = transcript_summary(tp)
-        detail.update(summary)
-        detail['session_facts'] = extract_session_facts(summary)
+        # 去抖（R1-4）：同一会话常在短时间内多次 Stop，每次都重扫同一个 transcript
+        # 是白费的 IO。短窗口内的重复触发只登记「被拦下」，不再重扫。
+        ok, gate = debounce_gate('stop', data.get('session_id'))
+        detail['debounce'] = gate
+        if ok:
+            summary = transcript_summary(tp)
+            detail.update(summary)
+            detail['session_facts'] = extract_session_facts(summary)
+        else:
+            detail['session_facts'] = {
+                'skipped': '去抖拦下（同一 session 短窗口内已扫过 transcript）'}
     else:
         detail['session_facts'] = {'skipped': '事件未带 transcript_path'}
 

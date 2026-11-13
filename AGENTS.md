@@ -18,9 +18,10 @@
 | 采集日志 | `采集日志.md` | 追加式编号条目，每轮采集记五连计数与跳过明细；人工决策以「决策记录」条形式追加在同一文件 |
 | 源清单白名单 | `collector/sources.json` | 采集只认这里列出的源根，改它就是改采集范围，须人写；`简历场景映射`、`主源裁决`、`场景警示规则` 也在这里 |
 | 采集器 | `collector/collect.py` | `--full` 全量重扫、`--incremental`（默认）走游标增量、`--dry-run` 只计数不落盘、`--only` 调试单源 |
-| 回归护栏 | `collector/tests/regression_guard.py` | 量化值/日期/模板识别/场景警示的断言集，exit 0 = 全通过；改 `collect.py` 抽取规则前后都必须跑 |
+| 回归护栏 | `collector/tests/regression_guard.py` | 量化值/日期/模板识别/场景警示/去重键与迁移的断言集（G1-G10 + D1-D4），exit 0 = 全通过；改 `collect.py` 抽取规则前后都必须跑 |
 | 增量游标 | `collector/state/cursor.json` | 文件级 mtime+size 签名、记录哈希与 id 映射，不入库 |
-| Hook 脚本 | `collector/hook_session_start.py`、`collector/hook_stop.py` | SessionStart 跑 `--incremental`，Stop 登记会话 transcript 线索；全链 fail-open，任何输入都只 exit 0 |
+| 去重键迁移 | `collector/migrate_dedup_key.py` | 一次性把存量 cursor 的 dedup_key 迁到 v2 分治口径（D3）；只改 key 不改 id，幂等防重迁，退役 id 写墓碑 |
+| Hook 脚本 | `collector/hook_session_start.py`、`collector/hook_stop.py` | SessionStart 跑 `--incremental`，Stop 登记会话 transcript 线索；同 session 60s 去抖（R1-4），全链 fail-open，任何输入都只 exit 0 |
 | Hook 接线配置 | `.qoder/settings.local.json` | Qoder hook 注册点（gitignore）；与同工作区其他 hook 并存时只能追加不能覆盖 |
 | 设计口径 | `docs/architecture.md` | 幂等、游标、证据定位、噪声过滤、状态机、场景警示的决策记录 |
 | 合成示例 | `examples/demo-sources/` | 两份简历 tex、项目 README、获奖记录、技能包，全部虚构，覆盖四个提取器 |

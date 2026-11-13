@@ -128,13 +128,41 @@ CASES = [
     ('Recall@5 目标 ≥ 85%；parsep=0pt；GPT-4 与 HTML5', ['85%']),
     ('幻灯片 1 / 幻灯片 2 / 幻灯片 3', []),
     ('2005 年 8 月出生', []),
-    # 下面一条是遗留噪声：OLD/NEW 两版都抽到 ['1','20']（已用旧版对照确认）。
-    # 遮罩号/文件名序号的既有口径不在本护栏范围内，
-    # 故此处按实际值锁定，仅用于盯住「不得变得更差」。
-    ('联系电话 (86)1XX-XXXX-XXXX；20XX 学年', ['1', '20']),
+    # R1-3 已改判：这条在早期是「遗留噪声按实际值 ['1','20'] 锁定、只盯不得
+    # 变得更差」，加了联系方式豁免规则后必须为空——
+    # 1XX-XXXX-XXXX 的 1 与 20XX 的 20 都是遮罩占位符前的碎片，不是事实数字。
+    ('联系电话 (86)1XX-XXXX-XXXX；20XX 学年', []),
     # 句中真数值不因章节号规则被误杀
     ('把响应时间从 1.1 提升到 2.4', ['1.1', '2.4']),
     ('38/38 测试全绿', ['38']),
+
+    # ---------------- D. R1-3 抽取去噪（本批新增） ----------------
+    # D1. 联系方式碎片：姓名 + 区号电话 + 邮箱，各段碎片都不是量化值。
+    ('Zhang San (+86) 138 0000 0000 zhangsan39@example.com', []),
+    ('Zhang San (+86)138-0000-0000 zhangsan39@example.com', []),
+    ('联系方式：138 1234 5678，邮箱 abc@example.com', []),
+    ('Tel: +86 138 0000 0000 / Mobile 159 8888 7777', []),
+    ('电话：010-1234 5678，Email: zhangsan39@example.com', []),
+    # D2. 零误杀锁定：同一段里的真值 5（Availability: 5 days/week）与
+    #     3.8 / 4.0（GPA）在联系方式碎片之后，绝不能被整段豁免连带杀掉。
+    ('Zhang San (+86) 138 0000 0000 zhangsan39@example.com Guangzhou, China '
+     'Availability: 5 days/week for 6 months, immediate start GPA: 3.8/4.0',
+     ['5', '3.8', '4.0']),
+    ('邮箱 abc@example.com；Availability: 5 days/week', ['5']),
+    ('联系电话 138 1234 5678；完成 21家客户 调研，回收 1,000+份问卷',
+     ['21家', '1,000+份']),
+    # D3. 文件名派生序号：无扩展名时也要挡（既有 _FILE_EXT_RE 只认「数字 + 扩展名点」）。
+    ('全部例句逐字取自示例简历3 原文', []),
+    ('版式与语言的双基准均为 01_主简历/示例简历3.tex：全部例句逐字取自示例简历3 原文', []),
+    ('详见附件报告2 与 论文3 的结论', []),
+    ('模板文件（简历模板3）解决版式，例句取自示例简历3', []),
+    # D4. 零误杀锁定：文档名词在数字**之后**（3份报告）、带单位、带小数、
+    #     排名序数（第7 / 第10）一律不受文件名派生规则影响。
+    ('完成 3份报告 与 5套模型、14个案例', ['3份', '5套', '14个']),
+    ('夏令营 GPA & 3.8 / 4.0 （专业排名第7）', ['3.8', '4.0', '7']),
+    ('取得了98分（排名第10）的优异成绩', ['98分', '10']),
+    ('2023级本科生 GPA & 3.8 / 4.0', ['2023级', '3.8', '4.0']),
+    ('回收 1,000+份问卷，累计 60,000+字', ['1,000+份', '60,000+字']),
 
     # ---------------- A. 日期抽取（F1） ----------------
 ]
@@ -218,6 +246,121 @@ for t, exp in [('GPA: 3.8/4.0，专业排名 5/30。', True),
 chk('非保研场景不打警示', C.scene_warning('求职-润色版', 'GPA: 3.8/4.0，专业排名 5/30。', _RULES) == '')
 chk('无规则不打警示', C.scene_warning('保研版', '专业排名 5/30', []) == '')
 chk('坏正则跳过', C.scene_warning('保研版', '专业排名 5/30', [{'场景含': '保研', '文本匹配': '(', '警示': 'x'}]) == '')
+
+print('')
+print('=== dedup_key / next_id / record_hash（路径口径分治锁定） ===')
+# G2 / G5 在旧 dedup_key 口径（名称入 key）下必 FAIL——它们是本次根治的正向 / 负面
+# 锁定，刻意如此设计。迁移到路径口径后应转 PASS。若将来这两条重新 FAIL，说明
+# dedup_key 被改回旧口径、或证据定位被塞回 key，属真回归，不是护栏坏了。
+import copy as _copy
+
+# G1 口径分治：tex 走 分类|名称|路径；非 tex 走 分类|路径|单条
+_g1_tex = C.dedup_key('简历', '某实体', ['/r/res.tex'])
+_g1_md = C.dedup_key('项目经历', '某标题', ['/p/v5.md'])
+chk('G1a tex 口径=分类|名称|路径', _g1_tex == '简历|某实体|/r/res.tex', _g1_tex)
+chk('G1b 非 tex 口径=分类|路径|单条', _g1_md == '项目经历|/p/v5.md|单条', _g1_md)
+
+# G2 改名不裂 key（旧代码必 FAIL，正向锁定）：同路径同分类、仅名称变 → key 不变
+_g2a = C.dedup_key('项目经历', '示例项目报告（四模块·判断先行版）', ['/p/v5.md'])
+_g2b = C.dedup_key('项目经历', '示例项目报告（四模块）', ['/p/v5.md'])
+chk('G2 非 tex 改名不裂 key（根治目标）', _g2a == _g2b, '%r != %r' % (_g2a, _g2b))
+
+# G3 同路径同分类合并、异分类不合并
+_g3a = C.dedup_key('项目经历', '别名A', ['/p/x.md'])
+_g3b = C.dedup_key('项目经历', '别名B', ['/p/x.md'])
+_g3c = C.dedup_key('实习经历', '别名A', ['/p/x.md'])
+chk('G3a 同分类同路径合并', _g3a == _g3b)
+chk('G3b 异分类不合并', _g3a != _g3c)
+
+# G4 tex/非 tex 分治 + 非 tex 一文件一条不变量（详见 collect.py EXTRACTORS 注释）
+chk('G4a 非 tex 提取器注册齐全',
+    all(n in C.EXTRACTORS for n in ('doc_auto', 'skill_registry', 'readme_oneliner')))
+chk('G4b tex 提取器 resume_tex 在注册表', 'resume_tex' in C.EXTRACTORS)
+_g4a = C.dedup_key('简历', '实体甲', ['/r/a.tex'])
+_g4b = C.dedup_key('简历', '实体乙', ['/r/a.tex'])
+chk('G4c tex 同路径异名称→key 相异（名称仍是判别位）', _g4a != _g4b)
+
+# G5 负面锁定——证据定位（L数字 / 节「」/ 工作表 「」/ HTML 首个）不得入 key（旧代码必 FAIL）
+_g5_base = C.dedup_key('项目经历', '成果标题', ['/p/y.md'])
+_g5_variants = [C.dedup_key('项目经历', '成果标题 ' + _loc, ['/p/y.md'])
+                for _loc in ('L12', '节「概述」', '工作表 「Sheet1」', 'HTML 首个表格')]
+chk('G5 证据定位后缀不入 key（非 tex）',
+    all(v == _g5_base for v in _g5_variants),
+    '%r' % ([v for v in _g5_variants if v != _g5_base][:1]))
+
+# G6 孤儿 key 不复活：模板类 key 再命中复用原 id、不涨序号
+_c6 = {'id映射': {}, '序号': 0}
+_k6 = C.dedup_key('简历', '简历模板-demo', ['/t/简历模板-demo.pdf'])
+_i6a = C.next_id(_c6, _k6)
+_i6b = C.next_id(_c6, _k6)
+chk('G6 孤儿 key 复用不涨序号',
+    _i6a == _i6b and _c6['序号'] == 1, 'id=%r/%r 序号=%d' % (_i6a, _i6b, _c6['序号']))
+
+# G7 next_id 单调不复用
+_c7 = {'id映射': {}, '序号': 0}
+_7a = C.next_id(_c7, 'k1')
+_7b = C.next_id(_c7, 'k2')
+_7c = C.next_id(_c7, 'k1')
+chk('G7a 新 key 单调递增', _7a == 'PI-0001' and _7b == 'PI-0002', '%r %r' % (_7a, _7b))
+chk('G7b 旧 key 复用不新分配', _7c == 'PI-0001' and _c7['序号'] == 2,
+    '%r 序号=%d' % (_7c, _c7['序号']))
+
+# G8 record_hash 排除字段锁定
+_rec8 = {'id': 'PI-0001', '版本': 1, '采集时间': 't0', '扫描模式': 'full',
+         '记录哈希': 'x', '名称': '标题', '成果': '内容', '分类': '项目经历',
+         '证据路径': ['/p/z.md'], '状态': '待核验'}
+_h8 = C.record_hash(_rec8)
+for _f in ('id', '版本', '采集时间', '扫描模式', '记录哈希'):
+    _r = _copy.deepcopy(_rec8)
+    _r[_f] = 'CHANGED'
+    chk('G8 排除字段 %s 改动不影响哈希' % _f, C.record_hash(_r) == _h8)
+for _f in ('名称', '成果', '状态'):
+    _r = _copy.deepcopy(_rec8)
+    _r[_f] = 'CHANGED'
+    chk('G8 内容字段 %s 改动必变哈希' % _f, C.record_hash(_r) != _h8)
+
+# G9 端到端（合成 cursor，不读盘）：改名 → 同 id、版本+1，而非裂新 id
+_c9 = {'id映射': {}, '序号': 0, '记录哈希': {}, '版本计数': {}}
+_p9 = '/tmp/g9_报告.md'
+_kA = C.dedup_key('项目经历', '报告标题A', [_p9])
+_idA = C.next_id(_c9, _kA)
+_recA = {'id': _idA, '名称': '报告标题A', '成果': '内容', '分类': '项目经历',
+         '证据路径': [_p9], '版本': 1}
+_hA = C.record_hash(_recA)
+_c9['版本计数'][_kA] = 1
+_c9['记录哈希'][_kA] = _hA
+_kB = C.dedup_key('项目经历', '报告标题B', [_p9])
+_idB = C.next_id(_c9, _kB)
+chk('G9a 改名后同 id（不裂）', _idA == _idB, '%r vs %r' % (_idA, _idB))
+chk('G9b 改名后 key 不变', _kA == _kB)
+_recB = _copy.deepcopy(_recA)
+_recB['名称'] = '报告标题B'
+_recB['id'] = _idB
+_hB = C.record_hash(_recB)
+chk('G9c 改名后哈希变（触发版本+1）', _hB != _c9['记录哈希'].get(_kB))
+
+# G10 迁移脚本 new_key() 纯函数 fixture（migrate_dedup_key.py，import 不触发迁移）
+_mspec = importlib.util.spec_from_file_location(
+    'M', os.path.join(HERE, '..', 'migrate_dedup_key.py'))
+_M = importlib.util.module_from_spec(_mspec)
+_mspec.loader.exec_module(_M)
+chk('G10a new_key md 3段→末段单条',
+    _M.new_key('项目经历|标题|/p/v5.md') == '项目经历|/p/v5.md|单条',
+    _M.new_key('项目经历|标题|/p/v5.md'))
+chk('G10b new_key tex→原样', _M.new_key('简历|实体|/r/a.tex') == '简历|实体|/r/a.tex')
+_g10_exit = False
+try:
+    _M.new_key('只有|两段')
+except SystemExit:
+    _g10_exit = True
+chk('G10c new_key 非 3 段→SystemExit', _g10_exit)
+chk('G10d is_migrated(key口径版本=2)→幂等跳过', _M.is_migrated({'key口径版本': 2}) is True)
+chk('G10e is_migrated(空)→False', _M.is_migrated({}) is False)
+for _cls, _nm, _pa in [('项目经历', '标题T', '/p/v5.md'), ('简历', '实体E', '/r/a.tex')]:
+    _runtime = C.dedup_key(_cls, _nm, [_pa])
+    _migrated = _M.new_key('%s|%s|%s' % (_cls, _nm, _pa))
+    chk('G10f dedup_key 与 new_key 口径一致 %s' % _pa,
+        _runtime == _migrated, '%r vs %r' % (_runtime, _migrated))
 
 print('\n===== %d 项不符 =====' % len(FAIL))
 for f in FAIL:

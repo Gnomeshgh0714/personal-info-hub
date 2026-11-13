@@ -413,6 +413,45 @@ _SECTION_LEAD_RE = re.compile(
 # 里斜杠前是文字，后面才是被列举出来的章节号。缺了这条豁免，带空格的
 # 「3.8 / 4.0」会因前导 2 字符是「/ 」而把 4.0 误判成章节号丢掉。
 _RATIO_PRE_RE = re.compile(r'\d(?:\.\d+)?\s*/\s*$')
+# 电话号码片段（R1-3）：区号（可带括号与 +）后接至少两组 3-4 位、以空格/点/横线
+# 分隔的数字；或不含区号的三组以上同形态数字。落在命中区间里的数字是号码碎片而非
+# 量化值——「(+86) 138 0000 0000」四段即此形态。
+# 不做「联系方式整段豁免」的理由：成果字段落盘前已把换行折成空格、压成单行，号码
+# 碎片与已复验真值 5（Availability: 5 days/week）、3.8/4.0（GPA）同处一段，整段豁免
+# 会连带杀掉真值。
+# 不误伤的形态：小数（12.3）、千位分隔（1,000）、日期（2026-11-11 的月日只 2 位）、
+# 区间（16--60）、比值（38/38）都构不成「≥3 段 3-4 位数字」；5 days/week 与
+# GPA: 3.8/4.0 后面紧跟英文词或斜杠，也不落在任何号码区间内。
+_PHONE_GROUP_RE = re.compile(
+    r'(?:\(\s*)?\+?\d{1,4}(?:\s*\))?[\s.\-]?\d{3,4}(?:[\s.\-]\d{3,4}){1,}'
+    r'|\d{3,4}(?:[\s.\-]\d{3,4}){2,}')
+# 号码片段只在候选数字附近的窗口里找（成果字段上限 800 字符），前 16 后 32 足以
+# 覆盖「区号 + 四组」的最长形态（约 25 字符），避免对每个候选数字全文扫一遍。
+_PHONE_WIN = (16, 32)
+# 遮罩占位符（R1-3）：数字后紧跟 X / ＊ 一类打码占位符时，它是被遮掉的联系方式或
+# 年份碎片（1XX-XXXX-XXXX 的 1、20XX 学年的 20），不是事实数字。
+_MASK_TAIL_RE = re.compile(r'[XxＸｘ＊*]')
+# 文件名主干序号（R1-3）：数字前紧贴文档名词、且本身是无单位裸整数时，它是文件名
+# 派生的序号（「示例简历3 原文」的 3、「详见附件报告2」的 2），不是量化值。
+# 既有 _FILE_EXT_RE 只认「数字 + 扩展名点」，无扩展名的写法会漏网。
+# 三重收窄保住真值：只认裸整数（3份报告、5套模型 带单位不受影响）、只认纯整数
+# （GPA 3.8 一类小数不受影响）、排除纯年份（2023级 由既有 YEAR_RE 规则处理）。
+_DOC_STEM_RE = re.compile(
+    r'(?:简历|报告|论文|文书|模板|稿件?|版本|附件|总结|计划|方案|记录|笔记|清单|'
+    r'说明|材料|文件|文档|答卷|作业|试卷|提纲|大纲|表格|截图|照片|证书|证明|'
+    r'推荐信|陈述)$')
+
+
+def _in_phone_group(文本: str, start: int, end: int) -> bool:
+    """候选数字是否落在电话号码片段区间内（R1-3 联系方式去噪）。
+
+    只在 [start-16, end+32] 的局部窗口里找号码片段，且要求某个命中区间**完整覆盖**
+    该数字：窗口被截断时宁可漏判（少杀）也不误判（错杀真值）。
+    """
+    lo = max(0, start - _PHONE_WIN[0])
+    seg = 文本[lo:min(len(文本), end + _PHONE_WIN[1])]
+    a, b = start - lo, end - lo
+    return any(pm.start() <= a and b <= pm.end() for pm in _PHONE_GROUP_RE.finditer(seg))
 
 
 def _quant_match(文本: str, m, seen: set, 时间数字=frozenset()):
@@ -433,6 +472,10 @@ def _quant_match(文本: str, m, seen: set, 时间数字=frozenset()):
     9. 英文技术名 + 空格 + 版本号，整数与小数都认：PostgreSQL 15、Django 5.2、
        Terminal-Bench 2.0 / 4.0。紧跟 ASCII 字母的（实测 6.3s）与考试分数
        （GPA 3.8、IELTS：7.5）靠 _SCORE_PRE_RE 与后置字母守卫豁免。
+    10. 电话号码片段：(+86) 138 0000 0000、138 1234 5678 里落在号码区间内的各段；
+    11. 遮罩占位符：1XX-XXXX-XXXX 的 1、20XX 学年的 20；
+    12. 文件名主干序号：无扩展名的写法也要挡——「示例简历3 原文」的 3、「附件报告2」
+        的 2（既有 _FILE_EXT_RE 只认「数字 + 扩展名点」）。
     明确保留的有价值形式：带单位（21家、97%、14套）、带加号（500+款、20+个）、
     小数（GPA 3.8、IELTS 7.5、实测 6.3s）、排名与分数比（专业排名 5/30、38/38 测试全绿）、
     考试分数（CET-6：600、IELTS：7.5）、量表分母（GPA & 3.8 / 4.0 的 4.0）、
@@ -474,6 +517,11 @@ def _quant_match(文本: str, m, seen: set, 时间数字=frozenset()):
         return None
     if post == '_':                       # 目录名编号前缀：01_主简历
         return None
+    # 遮罩占位符（R1-3）：1XX-XXXX-XXXX 的 1、20XX 学年的 20 都是被打码的联系方式/
+    # 年份碎片。只看紧邻的后一个字符且要求无单位：带单位的量化值后面跟的是单位汉字，
+    # 不会是 X；「3XL」一类尺码写法同样按噪声处理（它本来就不是业绩量化值）。
+    if not unit and post and _MASK_TAIL_RE.match(post):
+        return None
     # 多级编号的尾段：2.3.1 会被 QUANT_RE 切成 2.3 与 1，剩下的 1 前面紧贴
     # 「小数点 + 数字」，说明它只是编号的一段，不是独立数值。
     if pre == '.' and m.start() >= 2 and 文本[m.start() - 2].isdigit():
@@ -493,6 +541,18 @@ def _quant_match(文本: str, m, seen: set, 时间数字=frozenset()):
         return None                     # §3.4 / §7.5 / §8.2 / §7
     if _FILE_EXT_RE.match(文本[m.end():m.end() + 8]):
         return None                         # 文件名里的序号：resume_v3.tex
+    # 文件名主干序号的无扩展名写法（R1-3）：「全部例句逐字取自示例简历3 原文」的 3
+    # 后面是空格而非扩展名点，_FILE_EXT_RE 挡不住。
+    # 三重收窄（裸 + 纯整数 + 非年份）保住 3份报告、GPA 3.8、2023级、第7 等真值。
+    if (裸 and num.isdigit() and not YEAR_RE.match(num)
+            and _DOC_STEM_RE.search(文本[max(0, m.start() - 6):m.start()])):
+        return None                         # 示例简历3 / 附件报告2 / 论文3
+    # 电话号码片段（R1-3）：「(+86) 138 0000 0000」四段。只豁免落在号码区间内的
+    # 数字，同段真值 5（Availability）与 3.8/4.0（GPA）照常保留。
+    # 用 m.end(1)（数字本身的末尾）而非 m.end()：后者会把 \s* 吃进的空格算进来，
+    # 让区间右界越过数字本身，可能把紧邻其后的真值一并罩住。
+    if _in_phone_group(文本, m.start(), m.end(1)):
+        return None                         # 86 / 138 / 0000 / 0000 一类号码碎片
     if pre in ('（', '(') and post in ('）', ')') and 裸:   # 列表编号「（1）」
         return None
     if num in seen:
@@ -626,11 +686,25 @@ def truncate(s: str, n: int = SUMMARY_LEN) -> str:
     return s if len(s) <= n else s[:n].rstrip() + '…'
 
 
+# 视图渲染层要折成空格的字符：除 \n \t 外的 C0 控制字符（U+0000-U+001F）。
+# \n 由 cell() 末尾单独折成空格；\t 保留（渲染为空白、不折断表格）。
+# DEL（U+007F）未纳入：实测 jsonl 全库 0 命中，且它不属于 C0。
+VIEW_CTRL_RE = re.compile('[\x00-\x08\x0b-\x1f]')
+
+
 def cell(s) -> str:
-    """md 表格单元格转义。"""
+    """md 表格单元格转义。
+
+    归一化口径（R1-2）：除 \n \t 外的 C0 控制字符一律折成空格。
+    U+000B（垂直制表）与 U+000D（回车）会被 markdown 渲染器当换行处理、把表格行
+    折断——源文件原样带入的垂直制表曾导致分类视图的表格行断成两行。
+
+    只作用于视图渲染层：jsonl 是 append-only 事实源，源字符原样保留、绝不改写
+    （写盘走 json.dumps，不经过本函数），证据映射仍可回溯到源文件的原始字节。
+    """
     if s is None:
         return ''
-    s = str(s)
+    s = VIEW_CTRL_RE.sub(' ', str(s))
     return s.replace('|', '\\|').replace('\n', ' ').strip()
 
 
@@ -679,7 +753,10 @@ def next_id(cursor: dict, key: str) -> str:
 
 
 def dedup_key(分类: str, 名称: str, 证据路径: list[str]) -> str:
-    return '%s|%s|%s' % (分类, 名称, 证据路径[0] if 证据路径 else '')
+    路径 = 证据路径[0] if 证据路径 else ''
+    if 路径.endswith('.tex'):
+        return '%s|%s|%s' % (分类, 名称, 路径)   # 简历分节：名称仍是节内唯一判别位
+    return '%s|%s|单条' % (分类, 路径)            # 一文件一条：路径即身份
 
 
 def record_hash(rec: dict) -> str:
@@ -1269,6 +1346,12 @@ def date_from_name(stem: str) -> str:
     return ''                                # 无合法候选：时间留空，不硬塞
 
 
+# 提取器注册表。dedup_key 的分治口径依赖此处的产条数不变量：
+#   resume_tex —— 处理 .tex 简历、可产多条（分节），key 保留「名称」作节内判别位；
+#   其余（skill_registry / readme_oneliner / doc_auto）—— 非 tex、恒产 0 或 1 条，
+#     故 dedup_key 走「一文件一条·路径即身份」（名称不入 key，改名走版本+1）。
+# 纪律：若将来新增让「非 tex」文件产多条的提取器，必须同步改 dedup_key 与
+#   regression_guard 的 G4，否则多条会挤进同一 key、互相覆盖版本。
 EXTRACTORS = {
     'resume_tex': extract_resume_tex,
     'skill_registry': extract_skill_registry,
