@@ -138,14 +138,14 @@ CASES = [
 
     # ---------------- D. R1-3 抽取去噪（本批新增） ----------------
     # D1. 联系方式碎片：姓名 + 区号电话 + 邮箱，各段碎片都不是量化值。
-    ('Zhang San (+86) 138 0000 0000 zhangsan39@example.com', []),
-    ('Zhang San (+86)138-0000-0000 zhangsan39@example.com', []),
+    ('Zhang San (+86) 138 0000 0000 zhangsan@example.com', []),
+    ('Zhang San (+86)138-0000-0000 zhangsan@example.com', []),
     ('联系方式：138 1234 5678，邮箱 abc@example.com', []),
     ('Tel: +86 138 0000 0000 / Mobile 159 8888 7777', []),
-    ('电话：010-1234 5678，Email: zhangsan39@example.com', []),
+    ('电话：010-1234 5678，Email: zhangsan@example.com', []),
     # D2. 零误杀锁定：同一段里的真值 5（Availability: 5 days/week）与
     #     3.8 / 4.0（GPA）在联系方式碎片之后，绝不能被整段豁免连带杀掉。
-    ('Zhang San (+86) 138 0000 0000 zhangsan39@example.com Guangzhou, China '
+    ('Zhang San (+86) 138 0000 0000 zhangsan@example.com Guangzhou, China '
      'Availability: 5 days/week for 6 months, immediate start GPA: 3.8/4.0',
      ['5', '3.8', '4.0']),
     ('邮箱 abc@example.com；Availability: 5 days/week', ['5']),
@@ -370,7 +370,7 @@ for _cls, _nm, _pa in [('项目经历', '标题T', '/p/v5.md'), ('简历', '实�
 # --------------------------------------------------------------------------
 print('\n=== L-3 授权路径解析（_auth_path_from_key 段数断言） ===')
 chk('L-3a 锚点键→末段路径',
-    C._auth_path_from_key('锚点|resumeentry-a1|/r/示例简历3.tex') == '/r/示例简历3.tex')
+    C._auth_path_from_key('锚点|resumeentry-a1|/r/resume_v3.tex') == '/r/resume_v3.tex')
 chk('L-3b 名称键(tex)→末段路径',
     C._auth_path_from_key('简历|某实体|/r/res.tex') == '/r/res.tex')
 chk('L-3c 单条键→中段路径',
