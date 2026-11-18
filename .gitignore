@@ -70,7 +70,11 @@ venv/
 # 默认忽略，想公开示例数据时再显式 git add -f。
 中台数据/
 待核验队列.md
+待核验边界清单.md
 采集日志.md
+
+# --- 测试固件：tex 回源样本可能含真实数据，一律不入库 ---
+collector/tests/fixtures/
 
 # --- 本地 IDE 配置（hook 接线写在 .qoder/settings.local.json，含个人路径）---
 .qoder/settings.local.json

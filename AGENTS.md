@@ -18,10 +18,14 @@
 | 采集日志 | `采集日志.md` | 追加式编号条目，每轮采集记五连计数与跳过明细；人工决策以「决策记录」条形式追加在同一文件 |
 | 源清单白名单 | `collector/sources.json` | 采集只认这里列出的源根，改它就是改采集范围，须人写；`简历场景映射`、`主源裁决`、`场景警示规则` 也在这里 |
 | 采集器 | `collector/collect.py` | `--full` 全量重扫、`--incremental`（默认）走游标增量、`--dry-run` 只计数不落盘、`--only` 调试单源 |
-| 回归护栏 | `collector/tests/regression_guard.py` | 量化值/日期/模板识别/场景警示/去重键与迁移的断言集（G1-G10 + D1-D4），exit 0 = 全通过；改 `collect.py` 抽取规则前后都必须跑 |
+| 回归护栏 | `collector/tests/regression_guard.py` | 量化值/日期/模板识别/场景警示/去重键与迁移、tex 锚点、机械预筛转正的断言集（G1-G11 + D1-D4 + L-3/V 系列），exit 0 = 全通过；改 `collect.py` 抽取规则前后都必须跑 |
+| 字形守卫 | `collector/tests/glyph_guard.py` | commit 前扫文本文件的编码级与形近字损坏（H-1 git 故障不放行 / H-2 按 ref 取 blob / L-4 `# glyph-ok` 抑制收窄），exit 0=clean、1=HARD、2=SOFT、3=守卫自身失败；测试 `test_glyph_guard.py` |
+| 口述抽取测试 | `collector/tests/test_oral_extract.py` | 锁定 Stop hook 口述线索抽取（五句式模式 / 幂等键含 matched_pattern / M-2 否定词收窄 / 恒「待核验」不写 jsonl），exit 0 = 全过 |
+| tex 锚点迁移 | `collector/migrate_tex_anchor.py` | 一次性给简历 tex 每条上方插整行注释锚点 `% @pi: PI-XXXX`，把稳定身份位从「名称」换成锚点（口径 C），改名 / 跨节移位不裂 id；`--target-dir` 指定 tex 目录，默认 `examples/demo-sources/resume/` |
+| 机械预筛转正 | `collector/prescreen_verify.py` | 只算「回源逐字吻合且不含数字断言」的待核验条目转正名单，写 cursor「已核验」授权表；转正行仍由采集器下轮 `--incremental` 闸门追加（append-only 执行者唯一），内容一变即 pop 授权自动降级回待核验；`--dry-run` / `--apply` |
 | 增量游标 | `collector/state/cursor.json` | 文件级 mtime+size 签名、记录哈希与 id 映射，不入库 |
 | 去重键迁移 | `collector/migrate_dedup_key.py` | 一次性把存量 cursor 的 dedup_key 迁到 v2 分治口径（D3）；只改 key 不改 id，幂等防重迁，退役 id 写墓碑 |
-| Hook 脚本 | `collector/hook_session_start.py`、`collector/hook_stop.py` | SessionStart 跑 `--incremental`，Stop 登记会话 transcript 线索；同 session 60s 去抖（R1-4），全链 fail-open，任何输入都只 exit 0 |
+| Hook 脚本 | `collector/hook_session_start.py`、`collector/hook_stop.py` | SessionStart 跑 `--incremental`，Stop 从 transcript 抽取口述线索写入 `oral_clues.jsonl`（恒「待核验」、绝不自动转正）；同 session 60s 去抖（R1-4），`state/FROZEN` 空文件存在即冻结采集/抽取（H-3），全链 fail-open，任何输入都只 exit 0 |
 | Hook 接线配置 | `.qoder/settings.local.json` | Qoder hook 注册点（gitignore）；与同工作区其他 hook 并存时只能追加不能覆盖 |
 | 设计口径 | `docs/architecture.md` | 幂等、游标、证据定位、噪声过滤、状态机、场景警示的决策记录 |
 | 合成示例 | `examples/demo-sources/` | 两份简历 tex、项目 README、获奖记录、技能包，全部虚构，覆盖四个提取器 |
@@ -45,7 +49,7 @@
 2. 同源单版本、绝不分版：分类视图是生成物，不另存历史副本。
 3. 改采集范围先改 `collector/sources.json`，再跑 `python3 collector/collect.py --incremental`，最后在 `采集日志.md` 里看五连计数是否符合预期。
 4. 示例与文档不署真实个人姓名，示例数据一律合成虚构。
-5. 改 `collector/collect.py` 的抽取规则（量化值、日期、模板识别、警示规则）前后都跑一遍 `collector/tests/regression_guard.py`，通过后才允许 `--full` 重扫与 commit；临时自测脚本一律放 `collector/state/`（已 .gitignore），用完即删，不入仓库。
+5. 改 `collector/collect.py` 的抽取规则（量化值、日期、模板识别、警示规则）前后都跑一遍 `collector/tests/regression_guard.py`，通过后才允许 `--full` 重扫；commit 前再跑 `collector/tests/glyph_guard.py --staged` 拦形近字 / 编码损坏，两者均绿才 commit；临时自测脚本一律放 `collector/state/`（已 .gitignore），用完即删，不入仓库。
 
 ## 任务闭环
 
@@ -65,9 +69,9 @@ python3 collector/collect.py --full             # 落盘：重扫白名单内全
 | 事件 | 脚本 | 做什么 |
 | --- | --- | --- |
 | SessionStart | `collector/hook_session_start.py` | 跑 `collect.py --incremental`（内部超时 100s，必须小于 settings 的 120s） |
-| Stop | `collector/hook_stop.py` | 读会话 transcript，登记口述事实线索计数（「线索 → 候选条目」抽取尚未实现，暂不产生条目） |
+| Stop | `collector/hook_stop.py` | 读会话 transcript，按五个保守句式抽取口述事实线索写入 `collector/state/oral_clues.jsonl`（状态恒「待核验/口述线索」，绝不自动转正、绝不写 `personal_info.jsonl`） |
 
-注册点：`.qoder/settings.local.json`（SessionStart 120 / Stop 45；与既有 hook 并存时追加不覆盖）。临时停用：把脚本里的 `ENABLE_INCREMENTAL` / `ENABLE_SESSION_EXTRACT` 改回 False（仍会写事件日志、仍 exit 0）。触发证据看 `collector/state/hook_events.jsonl`。
+注册点：`.qoder/settings.local.json`（SessionStart 120 / Stop 45；与既有 hook 并存时追加不覆盖）。临时停用：把脚本里的 `ENABLE_INCREMENTAL` / `ENABLE_SESSION_EXTRACT` 改回 False（仍会写事件日志、仍 exit 0）。触发证据看 `collector/state/hook_events.jsonl`。整体冻结：建 `collector/state/FROZEN` 空文件即让两个 hook 跳过采集 / 抽取（仍写事件日志、仍 exit 0），删文件解冻（H-3）。
 
 ### 三、人工核验转正（手动：唯一能把状态改成「已核验」的入口）
 

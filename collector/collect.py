@@ -73,6 +73,11 @@ def scene_warning(场景: str, 文本: str, 规则: list | None) -> str:
             continue
     return ''
 
+# T20 预筛盲区扩展名：这些格式的回源重抽不可靠（xlsx 走 openpyxl 只取元信息、
+# docx 走 python-docx 段落拼接与采集器初轮路径不完全一致），一律不自动转正。
+# prescreen_verify.py 与 regression_guard V 系列共用此定义。
+PRESCREEN_BLIND_EXT = {'.xlsx', '.docx'}
+
 # 落盘字段序：基础字段 + 场景字段 + 记录哈希。场景字段只在非空时写入，
 # 所以 ordered 的拼装不能一律用 rec.get(k)（那会把 None 写进 jsonl）。
 BASE_FIELDS = ('id', '版本', '分类', '名称', '时间', '角色', '成果', '量化值',
@@ -155,6 +160,9 @@ class Stats:
         self.跳过模板文件 = 0
         self.只登记路径 = 0
         self.无源标记被占用 = 0   # 含无源数字但状态已被主源冲突/需OCR 占用的条目
+        self.锚点绑定 = 0        # 简历 tex 条目由显式锚点（% @pi:）绑定到稳定 id
+        self.简历tex无锚点 = 0   # 简历 tex 条目无锚点，退回旧 key（名称入 key）
+        self.锚点格式错误 = 0    # 命中宽松锚点正则但不合严格格式（显式报警，不静默降级）
         self.命中文件 = 0
         self.异常 = []          # [(源名, 路径, 错误)]
         self.源明细 = []        # [{源, 状态, 命中, 条目, 说明}]
@@ -729,6 +737,7 @@ def load_cursor() -> dict:
     c.setdefault('文件', {})
     c.setdefault('id映射', {})
     c.setdefault('记录哈希', {})
+    c.setdefault('已核验', {})   # T20 转正授权表：dedup_key → 待核验态 record_hash
     c.setdefault('序号', 0)
     return c
 
@@ -752,17 +761,42 @@ def next_id(cursor: dict, key: str) -> str:
     return new
 
 
-def dedup_key(分类: str, 名称: str, 证据路径: list[str]) -> str:
+def dedup_key(分类: str, 名称: str, 证据路径: list[str], 锚点: str = '') -> str:
     路径 = 证据路径[0] if 证据路径 else ''
+    # 口径 C：有显式锚点 → 身份位换成锚点（3 段，不含分类/名称，改名 + 跨节移位都不裂）。
+    # 第 4 参默认空串 → 现有全部调用点与 G1-G10 fixture 一行不改，向后兼容。
+    if 锚点:
+        return '锚点|%s|%s' % (锚点, 路径)
     if 路径.endswith('.tex'):
-        return '%s|%s|%s' % (分类, 名称, 路径)   # 简历分节：名称仍是节内唯一判别位
+        return '%s|%s|%s' % (分类, 名称, 路径)   # 简历分节无锚点：名称仍是节内唯一判别位
     return '%s|%s|单条' % (分类, 路径)            # 一文件一条：路径即身份
 
 
+def _auth_path_from_key(key: str):
+    """从去重键解析源文件绝对路径（dedup_key 的逆操作），供 --incremental 授权重扫。
+
+    约定：一个键只含一个 '/'-前缀段（源文件绝对路径）。L-3：名称含 '|' 会切出多段
+    致授权错位 / 静默失效——显式断言段数==1，不等则打印告警并返回 None（跳过该键，
+    显式失败优于静默失效）。不重构 cursor 表结构，不改任何已落盘数据。
+    """
+    segs = [s for s in key.split('|') if s.startswith('/')]
+    if len(segs) != 1:
+        print('[授权路径告警] 键切出 %d 个路径段（应为 1），跳过：%s'
+              % (len(segs), key), file=sys.stderr)
+        return None
+    return segs[0]
+
+
 def record_hash(rec: dict) -> str:
-    """内容哈希：排除 id/版本/采集时间/扫描模式/记录哈希，保证重跑不产生新行。"""
+    """内容哈希：排除 id/版本/采集时间/扫描模式/记录哈希/锚点，保证重跑不产生新行。
+
+    锚点是身份不是内容：排除后，插锚点引起的版本 +1 波及 证据定位（34 条）与
+    量化值[].定位（26 条 / 76 处）两类字段——都是行号 / 定位位移，非数据变更；
+    量化值[].值 序列零增删（无数据丢失）。锚点若入哈希会掺进额外变更原因，故排除
+    以保验收可干净归因。
+    """
     payload = {k: v for k, v in rec.items()
-               if k not in ('id', '版本', '采集时间', '扫描模式', '记录哈希')}
+               if k not in ('id', '版本', '采集时间', '扫描模式', '记录哈希', '锚点')}
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha1(blob.encode('utf-8')).hexdigest()[:16]
 
@@ -832,6 +866,14 @@ def md_title_and_summary(text: str, fallback: str) -> tuple[str, str, str, int]:
 # --------------------------------------------------------------------------
 # 简历 tex 解析
 # --------------------------------------------------------------------------
+# tex 简历锚点：整行注释 `% @pi: PI-XXXX`，把 dedup_key 的身份位从「名称」换成源文件里的
+# 显式锚点（口径 C），改名 / 跨节移位都不裂 id。整行注释而非行尾注释：TeX 遇 % 跳到行尾连
+# 换行一起吃掉，输出完全不变；行尾注释会多吃一个空格、可能扰动垂直间距。
+# 严格版：整行、大小写不敏感、中英文冒号都收、恰好 PI- + 4 位数字。
+_ANCHOR_RE = re.compile(r'^\s*%\s*@pi\s*[:：]\s*(PI-\d{4})\s*$', re.IGNORECASE)
+# 宽松版：任何像锚点意图的注释行（% @pi 开头）。命中宽松却不合严格 → 显式报「锚点格式错误」，
+# 不静默降级成普通注释（否则条目丢锚点、退回旧 key、id 可能漂）。
+_ANCHOR_LOOSE = re.compile(r'^\s*%\s*@pi\b', re.IGNORECASE)
 _BANNER_RE = re.compile(r'^%\s*[=]{3,}\s*(.+?)\s*[=]{3,}\s*$')
 _SECTION_RE = re.compile(r'\\(?:resumesection|section\*?|chapter\*?)\{([^{}]*)\}')
 _ENTRY_RE = re.compile(r'\\resumeentry\{((?:[^{}]|\{[^{}]*\})*)\}\s*\{((?:[^{}]|\{[^{}]*\})*)\}')
@@ -859,6 +901,7 @@ def parse_resume_tex(text: str) -> list[dict]:
     cur: dict | None = None
     item_buf: list[str] = []
     item_ln = 0
+    pending_anchor = ''        # 最近一条 `% @pi:` 锚点，绑定到下一个创建的条目后即清
 
     def flush_item():
         nonlocal item_buf, item_ln
@@ -884,14 +927,22 @@ def parse_resume_tex(text: str) -> list[dict]:
         mb = _BANNER_RE.match(line)
         if mb and not _SECTION_RE.search(line):
             flush_entry(idx)
+            pending_anchor = ''          # 节边界清暂存，防锚点跨节泄漏到下一节首条
             section_disp = mb.group(1).strip()
             section = section_disp.lower()
             if section in SKIP_SECTIONS:
                 cur = None
             continue
+        ma = _ANCHOR_RE.match(line)
+        if ma:
+            pending_anchor = ma.group(1).upper()   # 严格锚点：暂存，绑定到下一个创建的条目
+            continue
+        if _ANCHOR_LOOSE.match(line):
+            continue           # 格式错误的锚点意图行：不当内容处理，由 extract 层计数报警
         ms = _SECTION_RE.search(line)
         if ms:
             flush_entry(idx)
+            pending_anchor = ''          # 节边界清暂存，防锚点跨节泄漏
             section_disp = latex_inline_to_text(ms.group(1)).strip()
             section = section_disp.lower()
             if section in SKIP_SECTIONS:
@@ -907,7 +958,9 @@ def parse_resume_tex(text: str) -> list[dict]:
             name = latex_inline_to_text(me.group(1))
             when = latex_inline_to_text(me.group(2)) if me.lastindex and me.lastindex >= 2 else ''
             cur = {'节': section, '节原文': section_disp, '名称': name, '时间': when,
-                   '角色': '', '地点': '', '要点': [], '起行': idx, '止行': idx}
+                   '角色': '', '地点': '', '要点': [], '起行': idx, '止行': idx,
+                   '锚点': pending_anchor}
+            pending_anchor = ''
             continue
         msub = _SUBENTRY_RE.search(line)
         if msub and cur is not None:
@@ -922,7 +975,8 @@ def parse_resume_tex(text: str) -> list[dict]:
             if cur is None and section not in SKIP_SECTIONS:
                 cur = {'节': section, '节原文': section_disp, '名称': '', '时间': '',
                        '角色': '', '地点': '', '要点': [], '起行': idx, '止行': idx,
-                       '散段': True}
+                       '散段': True, '锚点': pending_anchor}
+                pending_anchor = ''
             item_buf = [mit.group(1)]
             item_ln = idx
             continue
@@ -938,7 +992,8 @@ def parse_resume_tex(text: str) -> list[dict]:
             if len(stripped) >= 6 and not line.lstrip().startswith('%'):
                 cur = {'节': section, '节原文': section_disp, '名称': '', '时间': '',
                        '角色': '', '地点': '', '要点': [], '起行': idx, '止行': idx,
-                       '散段': True}
+                       '散段': True, '锚点': pending_anchor}
+                pending_anchor = ''
                 item_buf = [line.strip()]
                 item_ln = idx
     flush_entry(len(lines) + 1)
@@ -1085,6 +1140,10 @@ def extract_resume_tex(src: dict, path: str, scan_mode: str, stats: Stats) -> li
 
     if path.endswith('.tex'):
         parsed = parse_resume_tex(text)
+        # 锚点格式错误：命中宽松但不合严格 → 显式计数报警，不静默降级
+        for _aln in lines:
+            if _ANCHOR_LOOSE.match(_aln) and not _ANCHOR_RE.match(_aln):
+                stats.锚点格式错误 += 1
         tex_norm = norm_lines(lines, 'tex')
         散段合并: dict[str, list] = {}
         for e in parsed:
@@ -1097,9 +1156,12 @@ def extract_resume_tex(src: dict, path: str, scan_mode: str, stats: Stats) -> li
                 if 节 in SKIP_SECTIONS:
                     continue
                 bucket = 散段合并.setdefault(
-                    节, {'要点': [], '起行': e['起行'], '分类': 分类, '节显示': 节显示})
+                    节, {'要点': [], '起行': e['起行'], '分类': 分类, '节显示': 节显示,
+                         '锚点': e.get('锚点', '')})
                 bucket['要点'].extend([(t, ln) for t, ln in e['要点']])
-                bucket['起行'] = min(bucket['起行'], e['起行'])
+                if e['起行'] < bucket['起行']:
+                    bucket['起行'] = e['起行']
+                    bucket['锚点'] = e.get('锚点', '')   # 锚点跟随最早起行（散段首个 \item）
                 continue
             成果 = '；'.join(要点文本) if 要点文本 else ''
             名称 = e['名称']
@@ -1113,12 +1175,15 @@ def extract_resume_tex(src: dict, path: str, scan_mode: str, stats: Stats) -> li
                 角色 = (角色 + ' · ' + e['地点']).strip(' ·')
             时间 = e['时间']
             量化 = quants_from_points(e['要点'], lines, tex_norm, 时间)
-            out.append(make_record(src, path, 分类, 名称, 时间, 角色, 成果, 定位,
-                                   lines, 采集方式, scan_mode,
-                                   状态=冲突状态,
-                                   量化值=量化, 冲突组=冲突组, 场景=场景,
-                                   场景警示=场景警示('%s %s' % (名称, 成果)),
-                                   主源裁决=主源裁决))
+            rec = make_record(src, path, 分类, 名称, 时间, 角色, 成果, 定位,
+                              lines, 采集方式, scan_mode,
+                              状态=冲突状态,
+                              量化值=量化, 冲突组=冲突组, 场景=场景,
+                              场景警示=场景警示('%s %s' % (名称, 成果)),
+                              主源裁决=主源裁决)
+            if e.get('锚点'):            # 非空才写，避免无条件写撑肿 record_hash
+                rec['锚点'] = e['锚点']
+            out.append(rec)
         for 节, bucket in 散段合并.items():
             要点文本 = [t for t, _ in bucket['要点']]
             if not 要点文本:
@@ -1128,12 +1193,15 @@ def extract_resume_tex(src: dict, path: str, scan_mode: str, stats: Stats) -> li
             定位 = '节「%s」L%d-L%d' % (bucket.get('节显示') or 节 or '未命名',
                                      bucket['起行'], 止行)
             量化 = quants_from_points(bucket['要点'], lines, tex_norm)
-            out.append(make_record(src, path, bucket['分类'], 名称, '', '',
-                                   '；'.join(要点文本), 定位, lines, 采集方式, scan_mode,
-                                   状态=冲突状态,
-                                   量化值=量化, 冲突组=冲突组, 场景=场景,
-                                   场景警示=场景警示('%s %s' % (名称, '；'.join(要点文本))),
-                                   主源裁决=主源裁决))
+            rec = make_record(src, path, bucket['分类'], 名称, '', '',
+                              '；'.join(要点文本), 定位, lines, 采集方式, scan_mode,
+                              状态=冲突状态,
+                              量化值=量化, 冲突组=冲突组, 场景=场景,
+                              场景警示=场景警示('%s %s' % (名称, '；'.join(要点文本))),
+                              主源裁决=主源裁决)
+            if bucket.get('锚点'):       # 非空才写
+                rec['锚点'] = bucket['锚点']
+            out.append(rec)
         return out
 
     # 非 tex（如经历补充 md）：走通用 md 抽取
@@ -1729,6 +1797,22 @@ def write_queue(records: list[dict]) -> None:
     else:
         out.append('| — | — | — | 暂无待核验项 | — | — |')
 
+    已核验 = [r for r in records if r.get('状态') == STATUS_VERIFIED]
+    out += ['', '---', '',
+            '## 五、已核验（机器预筛通过，回源逐字吻合）', '',
+            '> **语义边界**：「已核验」= 机器回源比对逐字吻合且不含任何数字断言，',
+            '> **不等于内容属实**；事实认定仍归用户。含数字/需OCR/盲区格式/排名类一律不自动转正。', '',
+            '| # | id | 分类 | 名称 | 时间 | 证据路径 |',
+            '|---|----|------|------|------|----------|']
+    if 已核验:
+        for i, r in enumerate(已核验, start=1):
+            out.append('| %d | %s | %s | %s | %s | `%s` |' % (
+                i, cell(r.get('id')), cell(r.get('分类')), cell(r.get('名称')),
+                cell(r.get('时间') or '—'),
+                cell(short_path((r.get('证据路径') or [''])[0]))))
+    else:
+        out.append('| — | — | — | 暂无已核验项（需先运行 prescreen_verify.py --apply） | — | — |')
+
     out += ['', '---', '']
     text = '\n'.join(out) + 裁决区
     with open(QUEUE_PATH, 'w', encoding='utf-8') as f:
@@ -1796,6 +1880,9 @@ def write_log(no: int, cfg: dict, scan_mode: str, stats: Stats,
            '| 跳过非白名单类型 | %d |' % stats.跳过其他类型,
            '| 跳过模板/占位文件 | %d |' % stats.跳过模板文件,
            '| 含无源数字但状态被占用（已写入无源量化值字段） | %d |' % stats.无源标记被占用,
+           '| 简历 tex 锚点绑定（锚点即 id） | %d |' % stats.锚点绑定,
+           '| 简历 tex 无锚点（退回旧 key，名称入 key） | %d |' % stats.简历tex无锚点,
+           '| 锚点格式错误（宽松命中严格不符，需人工修） | %d |' % stats.锚点格式错误,
            '| 单文件异常（已 catch 继续） | %d |' % len(stats.异常),
            '', '### 库存快照（按同 id 取最后一行聚合）', '',
            '| 维度 | 明细 |', '|---|---|',
@@ -1872,6 +1959,22 @@ def run(full: bool, dry: bool, only: str | None) -> int:
     cursor = load_cursor()
     if full:
         cursor['文件'] = {}        # --full 只清 mtime 游标，id 映射与记录哈希保留
+    # 锚点即 id 的一致性校验用：id 值 → 占用它的 key（反查重复绑定 / 整块复制）
+    id值归属: dict[str, str] = {}
+    for _k, _v in cursor['id映射'].items():
+        id值归属.setdefault(_v, _k)
+
+    # T20: cursor「已核验」授权指向的源文件，即使 mtime 未变也必须重扫——否则
+    # --incremental 的文件级 skip（下方）在闸门之前，授权永不触发转正（hook 同理）。
+    # 转正后授权保留：重扫 → 闸门命中 → h 已在记录哈希 → 走「未变条目」skip，不重复追加。
+    授权路径: set = set()
+    if not full:
+        for _k in cursor.get('已核验', {}):
+            # L-3: 授权键约定只含一个 '/'-前缀段；名称含 '|' 会切出多段致授权错位 /
+            # 静默失效。_auth_path_from_key 内断言段数==1，不等则告警并返回 None（跳过）。
+            _p = _auth_path_from_key(_k)
+            if _p:
+                授权路径.add(_p)
 
     待写: list[dict] = []
     for src in sources:
@@ -1902,7 +2005,7 @@ def run(full: bool, dry: bool, only: str | None) -> int:
                 stats.记异常(源名, path, e)
                 continue
             prev = cursor['文件'].get(path)
-            if not full and prev and prev.get('签名') == sig:
+            if not full and prev and prev.get('签名') == sig and path not in 授权路径:
                 stats.未变文件 += 1
                 continue
             try:
@@ -1913,9 +2016,43 @@ def run(full: bool, dry: bool, only: str | None) -> int:
             cursor['文件'][path] = {'签名': sig, 'mtime': int(st.st_mtime),
                                     'size': st.st_size, '源': 源名}
             for rec in recs:
-                key = dedup_key(rec['分类'], rec['名称'], rec['证据路径'])
-                rid = next_id(cursor, key)
+                锚点 = rec.get('锚点', '')
+                key = dedup_key(rec['分类'], rec['名称'], rec['证据路径'], 锚点)
+                if 锚点:
+                    # 锚点即 id：不走 next_id 分配，直接以锚点值为稳定 id
+                    rid = 锚点
+                    exist = cursor['id映射'].get(key)
+                    if exist and exist != rid:
+                        raise SystemExit('[FATAL] 锚点与库内 id 不符：key=%r 锚点=%s 库内=%s'
+                                         % (key, rid, exist))
+                    owner = id值归属.get(rid)
+                    if owner and owner != key:
+                        raise SystemExit('[FATAL] 锚点重复：%s 已被 key=%r 占用，又出现在 %r'
+                                         '（疑似整块复制 / 同文件重复）' % (rid, owner, key))
+                    try:
+                        num = int(rid.split('-')[1])
+                    except (IndexError, ValueError):
+                        raise SystemExit('[FATAL] 锚点值非法（无法解析序号）：%r' % rid)
+                    if num > int(cursor.get('序号', 0)):
+                        cursor['序号'] = num          # 抬升序号，防未来 next_id 撞号
+                    id值归属[rid] = key
+                    cursor['id映射'].setdefault(key, rid)
+                    stats.锚点绑定 += 1
+                else:
+                    rid = next_id(cursor, key)
+                    if rec['证据路径'] and rec['证据路径'][0].endswith('.tex'):
+                        stats.简历tex无锚点 += 1
                 rec['id'] = rid
+                # T20 转正闸门：cursor「已核验」表授权命中 → 状态升为已核验。
+                # 闸门在 record_hash 之前：先以待核验态算 h0 比对授权，命中后改状态，
+                # 再算 h（含已核验状态）→ h ≠ cursor['记录哈希'][key]（旧待核验哈希）
+                # → 触发追加新行（版本+1、状态=已核验）。次轮 h 已在 cursor → skip（幂等）。
+                闸门命中 = False
+                if rec.get('状态') == STATUS_PENDING:
+                    h0 = record_hash(rec)
+                    if cursor.get('已核验', {}).get(key) == h0:
+                        rec['状态'] = STATUS_VERIFIED
+                        闸门命中 = True
                 h = record_hash(rec)
                 rec['记录哈希'] = h
                 if cursor['记录哈希'].get(key) == h:
@@ -1932,8 +2069,13 @@ def run(full: bool, dry: bool, only: str | None) -> int:
                 for k in SCENE_FIELDS:            # 场景字段：空则不落盘
                     if rec.get(k):
                         ordered[k] = rec[k]
+                if rec.get('锚点'):                # 口径 C 锚点：非空才落盘（身份字段，不入 record_hash）
+                    ordered['锚点'] = rec['锚点']
                 ordered['记录哈希'] = rec['记录哈希']
                 待写.append(ordered)
+                # T20 内容变过且闸门未命中 → pop 授权（降级回待核验，下次需重新预筛）
+                if not 闸门命中:
+                    cursor.get('已核验', {}).pop(key, None)
                 条目 += 1
                 if 是更新:
                     stats.更新 += 1

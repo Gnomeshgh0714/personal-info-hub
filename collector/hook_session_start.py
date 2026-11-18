@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """个人信息中台 SessionStart hook。
 
 把本脚本注册到 Qoder 项目级 settings（.qoder/settings.local.json 或
@@ -39,6 +41,7 @@ BASE_DIR = os.path.dirname(COLLECTOR_DIR)                 # 仓库根
 STATE_DIR = os.path.join(COLLECTOR_DIR, 'state')
 EVENTS_PATH = os.path.join(STATE_DIR, 'hook_events.jsonl')
 COLLECT_PY = os.path.join(COLLECTOR_DIR, 'collect.py')
+FROZEN_PATH = os.path.join(STATE_DIR, 'FROZEN')       # H-3 外部冻结总闸（gitignored 空文件）
 
 # 接线开关：True = 会话开始即跑一次 --incremental。
 # 改回 False 可临时停用自动采集，脚本仍会写事件日志、仍 exit 0。
@@ -118,6 +121,15 @@ def truncate(text, n):
     return text if len(text) <= n else text[:n] + '…[截断]'
 
 
+def _is_frozen():
+    """H-3: collector/state/FROZEN 存在即冻结——跳过 --incremental 采集，仍写事件日志。
+    """
+    try:
+        return os.path.exists(FROZEN_PATH)
+    except OSError:
+        return False
+
+
 def run_incremental(session_id=None):
     """调 collect.py --incremental（R1-4 起带去抖）。
 
@@ -129,6 +141,9 @@ def run_incremental(session_id=None):
     """
     if not ENABLE_INCREMENTAL:
         return {'skipped': '接线开关已关（ENABLE_INCREMENTAL=False，只写事件日志）'}
+    if _is_frozen():
+        return {'skipped': 'FROZEN 冻结标志存在（collector/state/FROZEN），'
+                           '跳过 --incremental 采集，只写事件日志'}
     ok, gate = debounce_gate('session_start', session_id)
     if not ok:
         # 被去抖拦下也算一次「已处理」：把闸门信息一并记进事件日志供排查

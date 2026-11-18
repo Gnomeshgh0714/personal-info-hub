@@ -362,6 +362,288 @@ for _cls, _nm, _pa in [('项目经历', '标题T', '/p/v5.md'), ('简历', '实�
     chk('G10f dedup_key 与 new_key 口径一致 %s' % _pa,
         _runtime == _migrated, '%r vs %r' % (_runtime, _migrated))
 
+# --------------------------------------------------------------------------
+# L-3：_auth_path_from_key（dedup_key 逆操作）——--incremental 授权重扫的路径解析。
+# 约定一个键只含一个 '/'-前缀段；名称含 '|' 会切出多段致授权错位 / 静默失效，故断言
+# 段数==1，不等则告警并返回 None（跳过该键，显式失败优于静默失效）。合成 fixture，
+# 不耦合 gitignored 的 live cursor.json（移动靶）。
+# --------------------------------------------------------------------------
+print('\n=== L-3 授权路径解析（_auth_path_from_key 段数断言） ===')
+chk('L-3a 锚点键→末段路径',
+    C._auth_path_from_key('锚点|resumeentry-a1|/r/示例简历3.tex') == '/r/示例简历3.tex')
+chk('L-3b 名称键(tex)→末段路径',
+    C._auth_path_from_key('简历|某实体|/r/res.tex') == '/r/res.tex')
+chk('L-3c 单条键→中段路径',
+    C._auth_path_from_key('教育背景|/z/diploma.pdf|单条') == '/z/diploma.pdf')
+chk('L-3d 名称含|切出多段→None(跳过+告警)',
+    C._auth_path_from_key('实习经历|某|/evil/司|/y/report.md') is None)
+chk('L-3e 零路径段→None(跳过+告警)',
+    C._auth_path_from_key('实习经历|某公司|单条') is None)
+
+# --------------------------------------------------------------------------
+# G11 系列：tex 简历锚点根治（口径 C）正向锁定。
+# G11o / G11p / G11d 在旧解析器（parse_resume_tex 无 pending_anchor、dedup_key 无
+# 第 4 参、record_hash 未排除锚点）下必 FAIL——它们是本次根治的正向锁定，刻意如此
+# 设计。改完 collect.py 后应全部转 PASS；将来若重新 FAIL，说明锚点解析被回退，属真
+# 回归。fixture 全部自建合成 tex，不依赖真实简历文件（源文件是移动靶）。
+# --------------------------------------------------------------------------
+print('\n=== G11 tex 简历锚点根治（口径 C）正向锁定 ===')
+_G11_SENTINEL = '<无锚点字段>'
+
+
+def _g11_anchor(tex):
+    """解析合成 tex，返回首个条目的锚点字段（旧解析器无此字段则返回哨兵）。"""
+    es = C.parse_resume_tex(tex)
+    return es[0].get('锚点', _G11_SENTINEL) if es else _G11_SENTINEL
+
+
+# G11o 锚点解析：% @pi 整行注释绑定到紧邻其下的 \resumeentry 条目
+_G11O_TEX = '\n'.join([
+    '\\begin{document}',
+    '% ========== 实习经历 ==========',
+    '\\resumesection{实习经历}',
+    '% @pi: PI-0002',
+    '\\resumeentry{某公司}{2026 年 7 月 -- 至今}',
+    '\\begin{resumelist}',
+    '  \\item 独立完成 3 份行业标杆研究报告，覆盖 21 家客户。',
+    '\\end{resumelist}',
+    '\\end{document}',
+])
+chk('G11o 锚点解析：% @pi 绑定到紧邻 \\resumeentry 条目',
+    _g11_anchor(_G11O_TEX) == 'PI-0002', '实得 %r' % _g11_anchor(_G11O_TEX))
+
+# G11p pending_anchor 暂存：锚点绑定到无 \resumeentry 的技能散段隐式条目
+_G11P_TEX = '\n'.join([
+    '\\begin{document}',
+    '% ========== 技能 ==========',
+    '\\resumesection{技能}',
+    '\\begin{resumelist}',
+    '% @pi: PI-0012',
+    '  \\item 熟练运用 Python、R 与 Stata，擅长空间分析与数据可视化。',
+    '\\end{resumelist}',
+    '\\end{document}',
+])
+chk('G11p pending_anchor 暂存：锚点绑定到散段隐式条目',
+    _g11_anchor(_G11P_TEX) == 'PI-0012', '实得 %r' % _g11_anchor(_G11P_TEX))
+
+# G11p2 跨节清暂存：锚点后紧跟节标记（banner/section）则清空，不泄漏到下一节首条
+_G11P2_TEX = '\n'.join([
+    '\\begin{document}',
+    '% @pi: PI-0009',
+    '% ========== 项目经历 ==========',
+    '\\resumesection{项目经历}',
+    '\\resumeentry{某项目}{2025 年}',
+    '\\begin{resumelist}',
+    '  \\item 交付 9 页响应式官网。',
+    '\\end{resumelist}',
+    '\\end{document}',
+])
+chk('G11p2 跨节清暂存：锚点被节标记隔断则不绑定（防泄漏）',
+    _g11_anchor(_G11P2_TEX) == '', '实得 %r' % _g11_anchor(_G11P2_TEX))
+
+# G11d dedup_key 锚点口径（第 4 参）：有锚点 → 锚点|PI|路径（3 段，不含分类/名称）
+try:
+    _g11d = C.dedup_key('实习经历', '某公司', ['/r/a.tex'], 'PI-0002')
+except TypeError:
+    _g11d = '<第4参不被接受>'
+chk('G11d dedup_key 锚点口径=锚点|PI|路径', _g11d == '锚点|PI-0002|/r/a.tex',
+    '实得 %r' % _g11d)
+# G11d2 向后兼容：无锚点（第 4 参默认空）时 tex 仍走旧 fallback，一字不改（新旧都 PASS）
+_g11d2 = C.dedup_key('实习经历', '某公司', ['/r/a.tex'])
+chk('G11d2 无锚点 tex 退回旧 key（向后兼容）',
+    _g11d2 == '实习经历|某公司|/r/a.tex', '实得 %r' % _g11d2)
+
+# G11h record_hash 排除锚点：锚点是身份不是内容，增删锚点字段不改哈希
+_rec11 = {'id': 'PI-0002', '版本': 2, '名称': '某公司', '成果': '内容',
+          '分类': '实习经历', '证据路径': ['/r/a.tex'], '状态': '待核验'}
+_h11_no = C.record_hash(_rec11)
+_rec11b = _copy.deepcopy(_rec11)
+_rec11b['锚点'] = 'PI-0002'
+chk('G11h record_hash 排除锚点（带/不带锚点同哈希）',
+    C.record_hash(_rec11b) == _h11_no,
+    '%r vs %r' % (C.record_hash(_rec11b), _h11_no))
+
+# G11f 锚点正则：严格版收 % @pi: PI-0002（中英冒号/大小写/空格），宽松版捕获格式错误
+_AR = getattr(C, '_ANCHOR_RE', None)
+_AL = getattr(C, '_ANCHOR_LOOSE', None)
+if _AR is None or _AL is None:
+    chk('G11f _ANCHOR_RE/_ANCHOR_LOOSE 已定义', False, '缺失')
+else:
+    chk('G11f1 严格锚点中英冒号+大小写+空格都收',
+        bool(_AR.match('% @pi: PI-0002')) and bool(_AR.match('%@pi：pi-0007'))
+        and bool(_AR.match('  %  @PI :  PI-0035  ')))
+    chk('G11f2 严格锚点拒收错位（非 4 位/缺冒号/带尾注）',
+        (not _AR.match('% @pi: PI-002')) and (not _AR.match('% @pi PI-0002'))
+        and (not _AR.match('% @pi: PI-0002 尾注')))
+    chk('G11f3 宽松命中但严格不符 → 可判定格式错误',
+        bool(_AL.match('% @pi PI-0002')) and not _AR.match('% @pi PI-0002'))
+
+# G11s 锚点序列化：带锚点的 rec 经 ordered 重建后仍保留锚点字段
+# 模拟 run() 的 ordered 构建逻辑（BASE_FIELDS + SCENE_FIELDS + 锚点条件 + 记录哈希）
+_rec11s = {'id': 'PI-0002', '版本': 3, '分类': '实习经历', '名称': '某公司',
+           '时间': '', '角色': '', '成果': '内容', '量化值': [],
+           '无源量化值': None, '来源盘': 'demo', '来源工作区': '示例工作区',
+           '源清单': '个人简历', '证据路径': ['/r/a.tex'], '证据定位': '节L1-L5',
+           '采集时间': '2026-01-01T00:00:00+08:00', '采集方式': 'auto',
+           '扫描模式': 'incremental', '状态': '待核验', '主源冲突组': None,
+           '锚点': 'PI-0002', '记录哈希': 'abc123'}
+_ordered11s = {}
+for _k in C.BASE_FIELDS:
+    _ordered11s[_k] = _rec11s.get(_k)
+for _k in C.SCENE_FIELDS:
+    if _rec11s.get(_k):
+        _ordered11s[_k] = _rec11s[_k]
+if _rec11s.get('锚点'):
+    _ordered11s['锚点'] = _rec11s['锚点']
+_ordered11s['记录哈希'] = _rec11s['记录哈希']
+chk('G11s 锚点序列化：带锚点 rec 经 ordered 重建后保留锚点字段',
+    '锚点' in _ordered11s and _ordered11s['锚点'] == 'PI-0002',
+    'ordered keys=%r' % sorted(_ordered11s.keys()))
+
+# ===================== V 系列：T20 待核验转正闸门 =====================
+# 锁住 run() 内部转正闸门：授权命中转正、内容变自动降级(pop)、盲区/数字/OCR/教育
+# 类别零转正（无授权即不转正）、次轮幂等、write_queue 已核验分区 + 人工裁决区不变。
+# 闸门内联在 run() 里，这里用忠实复刻 _gate() 做纯函数级验证；V-G0 源码锁保证复刻
+# 与 collect.py 实际闸门段同步（改闸门必改此处，否则 V-G0 FAIL 提醒）。
+
+def _mkrec(**over):
+    r = {'id': 'PI-9001', '版本': 1, '分类': '项目经历', '名称': '某项目',
+         '时间': '2026-01', '角色': '开发', '成果': '完成模块',
+         '量化值': [], '无源量化值': None, '来源盘': 'demo', '来源工作区': '示例工作区',
+         '源清单': '项目', '证据路径': ['/r/p/v5.md'], '证据定位': '节L1-L5',
+         '采集时间': '2026-01-01T00:00:00+08:00', '采集方式': 'auto',
+         '扫描模式': 'incremental', '状态': C.STATUS_PENDING, '主源冲突组': None}
+    r.update(over)
+    return r
+
+
+def _cursor():
+    return {'记录哈希': {}, '已核验': {}, 'id映射': {}, '版本计数': {}, '序号': 0}
+
+
+def _gate(rec, key, cursor):
+    """忠实复刻 collect.py run() T20 闸门段（rec['id'] 赋值后 → pop 授权）。
+    返回 (rec, 闸门命中, 是否追加)。与源码同步维护。"""
+    闸门命中 = False
+    if rec.get('状态') == C.STATUS_PENDING:
+        h0 = C.record_hash(rec)
+        if cursor.get('已核验', {}).get(key) == h0:
+            rec['状态'] = C.STATUS_VERIFIED
+            闸门命中 = True
+    h = C.record_hash(rec)
+    rec['记录哈希'] = h
+    是否追加 = True
+    if cursor['记录哈希'].get(key) == h:
+        是否追加 = False                                   # 未变 → skip（幂等核心）
+    else:
+        cursor['记录哈希'][key] = h
+        if not 闸门命中:
+            cursor.get('已核验', {}).pop(key, None)         # 内容变 → 降级
+    return rec, 闸门命中, 是否追加
+
+
+print('\n=== V 系列：T20 转正闸门（%d 断言）===' % 11)
+
+# V-G0 源码锁：闸门关键行 + PRESCREEN_BLIND_EXT 仍在 collect.py（防复刻与实现脱节）
+with open(os.path.join(HERE, '..', 'collect.py'), encoding='utf-8') as _f:
+    _src = _f.read()
+chk('V-G0 闸门源码锁：转正闸门 + pop 降级 + PRESCREEN_BLIND_EXT 均在 collect.py',
+    "if rec.get('状态') == STATUS_PENDING:" in _src
+    and "cursor.get('已核验', {}).get(key) == h0" in _src
+    and "cursor.get('已核验', {}).pop(key, None)" in _src
+    and 'PRESCREEN_BLIND_EXT' in _src)
+
+# V-G1 授权命中转正：cursor 已核验[key]==待核验态哈希 → 升已核验 + 追加新行 + 授权保留
+_k1 = C.dedup_key('项目经历', '某项目', ['/r/p/v5.md'])
+_r1 = _mkrec()
+_c1 = _cursor()
+_c1['已核验'][_k1] = C.record_hash(_r1)                    # 授权 = 待核验态哈希
+_r1, _hit1, _add1 = _gate(_r1, _k1, _c1)
+chk('V-G1 授权命中 → 转正已核验 + 追加新行 + 授权保留不 pop',
+    _r1['状态'] == C.STATUS_VERIFIED and _hit1 and _add1
+    and _c1['已核验'].get(_k1) is not None,
+    '状态=%r 命中=%r 追加=%r' % (_r1['状态'], _hit1, _add1))
+
+# V-G2 内容变自动降级：授权哈希对不上 → 不转正 + 追加新行 + pop 授权
+_k2 = C.dedup_key('项目经历', '某项目', ['/r/p/v5.md'])
+_r2 = _mkrec(成果='完成模块（改版）')                       # 内容变了
+_c2 = _cursor()
+_c2['已核验'][_k2] = 'stale_hash_000'                      # 旧授权，与当前内容不符
+_r2, _hit2, _add2 = _gate(_r2, _k2, _c2)
+chk('V-G2 内容变 → 不转正(仍待核验) + 追加新行 + pop 授权降级',
+    _r2['状态'] == C.STATUS_PENDING and not _hit2 and _add2
+    and _k2 not in _c2['已核验'],
+    '状态=%r 命中=%r 授权残留=%r' % (_r2['状态'], _hit2, _k2 in _c2['已核验']))
+
+# V-G3 盲区扩展名不转正：集合定义正确 + 无授权 .xlsx 条目闸门不转正
+chk('V-G3a 盲区扩展名集合 == {.xlsx,.docx}',
+    C.PRESCREEN_BLIND_EXT == {'.xlsx', '.docx'}, repr(C.PRESCREEN_BLIND_EXT))
+_r3 = _mkrec(证据路径=['/r/data/table.xlsx'], 名称='数据表')
+_k3 = C.dedup_key('项目经历', '数据表', ['/r/data/table.xlsx'])
+_c3 = _cursor()                                            # 盲区格式：prescreen 不授权
+_r3, _hit3, _ = _gate(_r3, _k3, _c3)
+chk('V-G3b .xlsx 无授权 → 闸门不转正(仍待核验)',
+    _r3['状态'] == C.STATUS_PENDING and not _hit3)
+
+# V-G4 含数字不转正：量化值非空无授权 → 闸门不转正
+_r4 = _mkrec(量化值=[{'值': '30%', '已溯源': True}])
+_k4 = C.dedup_key('项目经历', '某项目', ['/r/p/v5.md'])
+_c4 = _cursor()
+_r4, _hit4, _ = _gate(_r4, _k4, _c4)
+chk('V-G4 含数字(量化值非空)无授权 → 闸门不转正(仍待核验)',
+    _r4['状态'] == C.STATUS_PENDING and not _hit4)
+
+# V-G5 需OCR不转正：闸门只处理待核验；需OCR 即便被误授权也不转正
+_r5 = _mkrec(状态=C.STATUS_NEEDOCR)
+_k5 = C.dedup_key('项目经历', '某项目', ['/r/p/v5.md'])
+_c5 = _cursor()
+_c5['已核验'][_k5] = C.record_hash(_r5)                    # 即便误授权
+_r5, _hit5, _ = _gate(_r5, _k5, _c5)
+chk('V-G5 需OCR状态 → 闸门只认待核验，即便被授权也不转正',
+    _r5['状态'] == C.STATUS_NEEDOCR and not _hit5)
+
+# V-G6 教育背景/获奖荣誉零转正：两类无授权 → 均不转正
+_ok6 = True
+for _cat in ('教育背景', '获奖荣誉'):
+    _r6 = _mkrec(分类=_cat, 名称='%s条目' % _cat)
+    _k6 = C.dedup_key(_cat, '%s条目' % _cat, ['/r/p/v5.md'])
+    _r6, _hit6, _ = _gate(_r6, _k6, _cursor())
+    if _r6['状态'] != C.STATUS_PENDING or _hit6:
+        _ok6 = False
+chk('V-G6 教育背景/获奖荣誉无授权 → 零转正', _ok6)
+
+# V-G7 次轮幂等：首轮转正追加新行；次轮同内容授权仍命中但记录哈希已存 → 不再追加
+_k7 = C.dedup_key('项目经历', '某项目', ['/r/p/v5.md'])
+_c7 = _cursor()
+_c7['已核验'][_k7] = C.record_hash(_mkrec())               # 授权
+_, _, _add7a = _gate(_mkrec(), _k7, _c7)                   # 首轮：转正 + 追加
+_, _hit7b, _add7b = _gate(_mkrec(), _k7, _c7)              # 次轮：同内容
+chk('V-G7 幂等：首轮追加新行、次轮授权仍命中但不再追加(记录哈希已存)',
+    _add7a and _hit7b and not _add7b,
+    '首轮追加=%r 次轮命中=%r 次轮追加=%r' % (_add7a, _hit7b, _add7b))
+
+# V-G8 write_queue 已核验分区存在 + 人工裁决区逐字节保留
+import tempfile as _tf
+_qd = _tf.mkdtemp()
+_old_q = os.path.join(_qd, 'queue.md')
+_judge = (C.JUDGE_MARK + '（只追加，生成器不覆盖本区）\n\n'
+          '- [2026-11-12] id=PI-0001 裁决：属实 → 状态改为 已核验\n')
+with open(_old_q, 'w', encoding='utf-8') as f:
+    f.write('# 待核验队列\n\n旧内容\n\n' + _judge)
+_saved_qp = C.QUEUE_PATH
+C.QUEUE_PATH = _old_q
+try:
+    C.write_queue([_mkrec(id='PI-8001', 状态=C.STATUS_VERIFIED, 名称='已核验项'),
+                   _mkrec(id='PI-8002', 状态=C.STATUS_PENDING, 名称='待核验项')])
+    with open(_old_q, encoding='utf-8') as f:
+        _q_out = f.read()
+finally:
+    C.QUEUE_PATH = _saved_qp
+chk('V-G8a write_queue 生成「已核验」第五节 + 语义边界文案 + 已核验条目在列',
+    '## 五、已核验' in _q_out and '不等于内容属实' in _q_out and 'PI-8001' in _q_out)
+chk('V-G8b write_queue 逐字节保留既有人工裁决区',
+    _judge.strip() in _q_out and '裁决：属实' in _q_out)
+
 print('\n===== %d 项不符 =====' % len(FAIL))
 for f in FAIL:
     print(' - ' + f)

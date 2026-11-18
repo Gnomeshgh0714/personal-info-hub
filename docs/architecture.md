@@ -16,7 +16,7 @@ sources.json 白名单 → iter_source_files 定点遍历 → 提取器（一文
 
 jsonl 是追加式事件日志，不是状态表。同一事实的更新以新行落盘、`版本` 递增；下游视图按「同 id 取最后一行」聚合。旧行不删不改，历史靠日志本身回溯。id 首次入库时分配（`PI-` + 四位序号），此后永远沿用，不因重扫而变。
 
-事实身份由 `dedup_key` 界定，按证据形态分治（D3）：简历 tex（路径以 `.tex` 结尾）走 `分类|名称|路径`——一份简历分多节、每节一条，名称是节内唯一判别位，必须保留；其余文件走 `分类|路径|单条`——一文件一条、路径即身份，改名不再裂出新 id，而是沿用原 id 走版本 +1。旧口径一律 `分类|名称|路径`，会让同一文件因名称微调裂出重复 id。存量游标用一次性脚本 `collector/migrate_dedup_key.py` 迁到新口径：只改 cursor 的 key、不改 id、不改任何 rec 字段，合并组退役 id 写墓碑，`key口径版本=2` 幂等防重迁（纯函数 `new_key`/`is_migrated` 供护栏 G10 import，import 不触发迁移）。
+事实身份由 `dedup_key` 界定，按证据形态分治（D3）：简历 tex（路径以 `.tex` 结尾）走 `分类|名称|路径`——一份简历分多节、每节一条，名称是节内唯一判别位，必须保留；其余文件走 `分类|路径|单条`——一文件一条、路径即身份，改名不再裂出新 id，而是沿用原 id 走版本 +1。旧口径一律 `分类|名称|路径`，会让同一文件因名称微调裂出重复 id。存量游标用一次性脚本 `collector/migrate_dedup_key.py` 迁到新口径：只改 cursor 的 key、不改 id、不改任何 rec 字段，合并组退役 id 写墓碑，`key口径版本=2` 幂等防重迁（纯函数 `new_key`/`is_migrated` 供护栏 G10 import，import 不触发迁移）。简历 tex 另有更稳的口径 C：`collector/migrate_tex_anchor.py` 给每条上方插整行注释锚点 `% @pi: PI-XXXX`，key 换成 `锚点|PI|路径`，改名 / 跨节移位都不裂 id（`key口径版本=3`，纯函数 `anchor_key`/`is_migrated`/`insert_anchors`/`strip_anchors` 供护栏 import）。
 
 ## 内容哈希幂等
 
@@ -77,9 +77,31 @@ jsonl 是追加式事件日志，不是状态表。同一事实的更新以新�
 2. `isinstance(data, dict)` 守卫——stdin 是合法 JSON 但为数组/字符串/数字时当空输入处理；
 3. `__main__` 兜底 try/except——任何未预料异常也只 exit 0。
 
-写盘边界：日志目录由脚本自身位置推导，不使用 cwd，无论 IDE 从哪个工作目录调起都只写进本仓库内。transcript 只读不写，只做字节/行级轻量统计，不假设其 JSON 结构。
+写盘边界：日志目录由脚本自身位置推导，不使用 cwd，无论 IDE 从哪个工作目录调起都只写进本仓库内。transcript 只读不写。Stop 按 JSONL 逐行解析，只从 `type=='user'` 且 `message.content` 为原始字符串（不是 list）的行抽口述线索，绝不从 assistant 输出或 tool_result 抽；解析失败的行静默跳过。
 
 去抖（R1-4）：同一 session 在 60s 窗口内重复触发不重复跑——SessionStart 省一次增量采集，Stop 省一次 transcript 重扫。状态存 `collector/state/debounce.json`（gitignore），最多保留 200 个键防 session 累积撑大。去抖本身 fail-open：读写异常、时钟回拨（gap < 0）一律按放行处理，绝不因去抖漏采；恒 exit 0 的语义不变。
+
+## 口述线索抽取（保守 v1）
+
+Stop hook 从会话 transcript 抽用户口述的事实线索，五层过滤宁漏不误：Layer 0 只认 `type==user` 且 `message.content` 为原始字符串的行；Layer 1 噪声过滤（过短、问号结尾、全 ASCII、整段皆否定 / 指令）；Layer 2 线索词粗筛；Layer 3 五个保守句式模式（我在 X 做了 Y / 我拿了 X 奖 / 项目 X 了 Y / 我的 GPA 是 X / 我 X 年从 Y 毕业）；Layer 4 落结构化线索。M-2 把否定词 `别` 收窄成「别 + 动词」，避免误杀「特别奖学金」「级别评定」；否定 / 指令按句切分逐句过滤，不因一句废掉同段其余真实事实。
+
+线索只 append 写 `collector/state/oral_clues.jsonl`（gitignore），状态恒「待核验/口述线索」，绝不自动转正、绝不写 `personal_info.jsonl`。幂等键为 `(session_id, line_no, matched_pattern)`（M-1）：同一行命中多个句式时各自落盘，重跑不重复。整条抽取链包 try/except，异常只写事件日志、恒 exit 0。
+
+## FROZEN 冻结总闸（H-3）
+
+`collector/state/FROZEN`（gitignore 空文件）存在即冻结：两个 hook 跳过 `--incremental` 采集与口述抽取，仍写事件日志、仍 exit 0；删文件即解冻。冻结状态由这个 git 可见性无关的标志文件承载，取代「临时改 `ENABLE_*`=False」那种不入 commit、交付态与实际态相反的工作树临时态。
+
+## tex 简历锚点：稳定 id（口径 C）
+
+简历 tex 条目的稳定身份原先靠 `dedup_key` 里的「名称」判别位，改名 / 跨节移位会撕裂 id。`migrate_tex_anchor.py` 一次性给每条上方插一行整行注释锚点 `% @pi: PI-XXXX`（列 0 插入，TeX 遇 `%` 吃到行尾，PDF 输出零漂移），把身份位换成锚点：`new_key = 锚点|PI|路径`。锚点值与目标文件清单都从 cursor 反查，禁止硬编码；插锚点（A）与改 cursor 三表 key（B）同进程连续完成，任何不符即从 copy2 备份两侧还原、绝不带病落盘。
+
+## 机械预筛转正（T20）
+
+`prescreen_verify.py` 只算转正名单 + 写 cursor「已核验」授权表 + 生成边界清单，**不碰 jsonl / 六视图 / 待核验队列**——转正行由采集器下一轮 `--incremental` 的闸门追加（版本 +1、状态 = 已核验），保证 append-only 的执行者唯一。授权表存 `dedup_key → h0`（回源重抽的待核验态记录哈希），下轮闸门重算 fresh rec 的 h0，逐字命中授权才升状态；内容一变则不命中并 pop 授权，自动降级回待核验，所以 `--apply` 永不误转正。判据保守：含数字 / 需 OCR / 盲区格式（.xlsx/.docx）/ 排名类 / 主源冲突 / 回源不吻合一律不自动转正。「已核验」在这里=机器回源逐字吻合且不含数字断言，**不等于内容属实**，事实认定仍归人。
+
+## 字形守卫
+
+`glyph_guard.py` 在 commit 前扫文本文件，拦编码级损坏（U+FFFD 替换符一类，HARD，exit 1）与已知形近字损坏（词表命中，SOFT，exit 2）；git 故障或跨 commit 空清单不放行（守卫自身失败，exit 3）。支持 FILE / `--staged` / `--commit REF` / `--range A..B`。`# glyph-ok:词` 行内标记只屏蔽列出且位于标记之前的词，裸标记不抑制（L-4）。它与 `regression_guard.py` 平级独立：后者查采集逻辑正确性，前者查文本编码完整性；改 `collect.py` 前跑 regression_guard，commit 前跑 glyph_guard。建议（不强制）接进 git pre-commit hook。
 
 ## 隐私默认
 

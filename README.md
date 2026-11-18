@@ -35,7 +35,7 @@ collector/collect.py ── 四个提取器
 collector/state/（游标、id 映射、hook 事件日志；gitignore）
         ▲
 hook_session_start.py（SessionStart → --incremental 增量采集）
-hook_stop.py（Stop → transcript 线索登记）
+hook_stop.py（Stop → transcript 口述线索抽取）
 ```
 
 ## 快速开始（demo）
@@ -48,6 +48,7 @@ cd personal-info-hub
 python3 collector/collect.py --full --dry-run   # 先看计数与源根明细，不落盘
 python3 collector/collect.py --full             # 落盘
 python3 collector/tests/regression_guard.py     # 回归护栏，exit 0 为全过
+python3 collector/tests/test_glyph_guard.py     # 字形守卫测试，exit 0 为全过
 ```
 
 demo 配置指向 `examples/demo-sources/` 下的合成示例（人物、机构与数字全部虚构）：两份简历 tex、一份项目 README、一份获奖记录、一个技能包。跑完得到 10 条条目、六份分类视图、待核验队列与采集日志；再跑一遍 `--full` 新增为 0（内容哈希幂等）。保研版简历的 GPA/排名条目会自动带上场景警示标签，求职版的同类条目不带——这是「多源按场景并存 + 配置化警示」的演示。
@@ -82,7 +83,7 @@ demo 配置指向 `examples/demo-sources/` 下的合成示例（人物、机构�
 }
 ```
 
-SessionStart 跑增量采集（脚本内部超时 100s，小于外层 120s，超时会写进事件日志供排查）；Stop 登记 transcript 口述线索计数（「线索 → 候选条目」的抽取尚未实现，不会产生条目）。临时停用：把脚本顶部的 `ENABLE_INCREMENTAL` / `ENABLE_SESSION_EXTRACT` 改回 False，仍会写事件日志、仍 exit 0。触发证据看 `collector/state/hook_events.jsonl`。其他支持 stdin 事件 JSON 的 Agent 工具可按同样方式接线。
+SessionStart 跑增量采集（脚本内部超时 100s，小于外层 120s，超时会写进事件日志供排查）；Stop 从 transcript 抽取口述事实线索写入 `collector/state/oral_clues.jsonl`（状态恒「待核验/口述线索」，绝不自动转正、绝不写 `personal_info.jsonl`）。临时停用：把脚本顶部的 `ENABLE_INCREMENTAL` / `ENABLE_SESSION_EXTRACT` 改回 False，仍会写事件日志、仍 exit 0。整体冻结：建 `collector/state/FROZEN` 空文件即让两个 hook 跳过采集 / 抽取（仍写日志、仍 exit 0），删文件解冻。触发证据看 `collector/state/hook_events.jsonl`。其他支持 stdin 事件 JSON 的 Agent 工具可按同样方式接线。
 
 ## 隐私纪律
 
@@ -96,10 +97,15 @@ SessionStart 跑增量采集（脚本内部超时 100s，小于外层 120s，超
 ```
 collector/
   collect.py               采集器（扫描、抽取、落盘、视图生成）
+  prescreen_verify.py      机械预筛转正（算转正名单 + 写 cursor 授权表，不碰 jsonl）
+  migrate_tex_anchor.py    tex 简历锚点迁移（一次性，口径 C 稳定 id）
   sources.json             源清单白名单（demo 配置，兼作配置模板）
   hook_session_start.py    SessionStart hook（fail-open）
-  hook_stop.py             Stop hook（fail-open）
+  hook_stop.py             Stop hook（口述线索抽取，fail-open）
   tests/regression_guard.py 回归护栏（改抽取规则前后必跑）
+  tests/glyph_guard.py     字形损坏守卫（commit 前扫形近字 / 编码损坏）
+  tests/test_glyph_guard.py 字形守卫测试
+  tests/test_oral_extract.py 口述线索抽取测试
   state/                   运行时状态（gitignore，跑后生成）
 schema/条目模板.md          人写条目与机读字段的对照模板
 examples/demo-sources/     合成示例源（全部虚构）
